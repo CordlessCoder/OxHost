@@ -1,43 +1,36 @@
 // #![allow(unused)]
-use arc_swap::ArcSwap;
+
 use axum::{
     body::{Bytes, StreamBody},
     extract::{Path, State},
-    http::{header, HeaderMap, StatusCode},
-    response::{Html, IntoResponse, Response},
-    routing::{get, post},
-    Json, Router,
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
+    routing::get,
+    Router,
 };
 use bytesize::ByteSize;
 use dashmap::DashMap;
 use mime_types::MIME_TYPES;
 use minify_html::Cfg;
 use minify_js::Session;
-use notify::{
-    event::{MetadataKind, ModifyKind},
-    Event, Watcher,
-};
+use notify::{Event, Watcher};
 use notify_deb::{new_debouncer, DebounceEventResult};
 use os_str_bytes::RawOsStr;
 use path_clean::PathClean;
 use std::{
     collections::HashMap,
-    env::{current_dir, set_current_dir},
     ffi::OsStr,
     fmt::Debug,
-    io::{stderr, stdout, Read, Stderr, Stdout, Write},
+    io::{stderr, Read, Stderr, Write},
     net::SocketAddr,
     ops::Deref,
     path::PathBuf,
-    sync::{atomic::AtomicUsize, mpsc::sync_channel, Arc},
+    sync::{mpsc::sync_channel, Arc},
     time::Duration,
 };
-use tokio::{fs::File, io::AsyncWriteExt, join, task::JoinHandle, time::Instant, try_join};
+use tokio::{fs::File, join, task::JoinHandle, time::Instant};
 use tokio_util::io::ReaderStream;
-use tracing::{
-    debug, debug_span, error, error_span, event, info, info_span, instrument,
-    metadata::LevelFilter, span, warn, warn_span, Level,
-};
+use tracing::{error, info, info_span, instrument, metadata::LevelFilter, warn};
 use tracing_appender::rolling::{RollingFileAppender, RollingWriter};
 use tracing_subscriber::fmt::{format::FmtSpan, MakeWriter};
 use walkdir::WalkDir;
@@ -67,11 +60,11 @@ impl Debug for FileData {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Config {
-    path: &'static str,
-    path_os: std::path::PathBuf,
-}
+// #[derive(Debug, Clone)]
+// pub struct Config {
+//     path: &'static str,
+//     path_os: std::path::PathBuf,
+// }
 
 type FileMap = &'static DashMap<Arc<PathBuf>, FileData>;
 
@@ -107,7 +100,7 @@ impl Write for StdoutWrapper {
     fn flush(&mut self) -> std::io::Result<()> {
         self.out.flush()
     }
-    fn write_all(&mut self, mut buf: &[u8]) -> std::io::Result<()> {
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
         self.out.write_all(buf)
     }
     fn write_fmt(&mut self, fmt: std::fmt::Arguments<'_>) -> std::io::Result<()> {
@@ -205,7 +198,7 @@ fn cache<P: AsRef<std::path::Path>>(path: P) -> bool {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// The path to get the files we're going to host from
+    // The path to get the files we're going to host from
     let path: &str = "public";
     let path_os = std::path::Path::new(path).canonicalize().unwrap();
     let path_prefix_len = path_os.iter().count();
@@ -217,7 +210,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Set up tracing
     let file_writer = tracing_appender::rolling::daily("logs", "log");
     let writer = Logger::new(file_writer, StdoutWrapper::new());
-    let subscriber = tracing_subscriber::fmt()
+    let _subscriber = tracing_subscriber::fmt()
         .with_ansi(true)
         .with_span_events(FmtSpan::CLOSE)
         .with_max_level(LevelFilter::WARN)
@@ -244,7 +237,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         index_filename: &OsStr,
         map: FileMap,
     ) {
-        let mut path = path.clean();
+        let path = path.clean();
         let mut path: PathBuf = path.into_iter().skip(path_prefix_len).collect();
         // Remove prefix from path
         map.remove(&path);
@@ -258,7 +251,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     #[instrument(level = "debug")]
     fn handle_path(path: PathBuf, path_prefix_len: usize, index_filename: &OsStr, map: FileMap) {
-        let mut path = path.clean();
+        let path = path.clean();
         // Ignore hidden files
         if path
             .file_name()
@@ -362,11 +355,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Ignore directories
                 continue;
             }
-            let Ok(meta) = entry.metadata() else {
+            let Ok(_meta) = entry.metadata() else {
                 // Ignore files we can't get metadata for
                 continue;
             };
-            let mut path = entry.into_path();
+            let path = entry.into_path();
             handle_path(path, path_prefix_len, index_filename, map)
         }
         drop(span);
@@ -380,7 +373,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut change_map = HashMap::new();
         for events in rx {
             for event in events {
-                let Event { kind, paths, attrs } = event;
+                let Event {
+                    kind,
+                    paths,
+                    attrs: _,
+                } = event;
                 use notify::EventKind::*;
                 use FileState::*;
                 let mut paths = paths.into_iter();
@@ -395,7 +392,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Mark file as invalidated
                         change_map.insert(first, Modified);
                     }
-                    Remove(kind) => {
+                    Remove(_kind) => {
                         // Mark file as deleted
                         change_map.insert(first, Deleted);
                     }
@@ -448,17 +445,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 // basic handler that responds with a static string
 // #[instrument(skip(state))]
-#[instrument()]
+#[instrument(level = "info")]
 #[axum::debug_handler]
 async fn get_file(State(state): State<AppState>, Path(path): Path<PathBuf>) -> impl IntoResponse {
-    // let span = info_span!("Getting file info", path = path.to_string_lossy().as_ref()).entered();
     let mut path = Arc::new(path);
     let res = 'main: loop {
         use FileData::*;
         let Some(file) = state.map.get(&path) else {
             return ( StatusCode::NOT_FOUND,"Not Found.\n",).into_response()
         };
-        let mut file: &FileData = file.deref();
+        let file: &FileData = file.deref();
         // Loop in case we need to traverse references
         match file {
             Uncached(path) => {
