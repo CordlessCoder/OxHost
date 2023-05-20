@@ -761,9 +761,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+const MAX_ENCODING_LEN: usize = 256;
+
 fn is_subslice(haystack: &[u8], needle: &[u8]) -> bool {
     haystack
         .windows(needle.len())
+        .take(MAX_ENCODING_LEN)
         .any(|window| window == needle)
 }
 
