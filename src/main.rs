@@ -27,7 +27,7 @@ use std::{
     io::{self, stderr, Read, Seek, Stderr, Write},
     net::SocketAddr,
     ops::Deref,
-    path::PathBuf,
+    path::{self, PathBuf},
     sync::{mpsc::sync_channel, Arc},
     time::Duration,
 };
@@ -66,7 +66,7 @@ impl Debug for FileData {
 // #[derive(Debug, Clone)]
 // pub struct Config {
 //     path: &'static str,
-//     path_os: std::path::PathBuf,
+//     path_os: path::PathBuf,
 // }
 
 type FileMap = &'static DashMap<Arc<PathBuf>, FileData>;
@@ -178,7 +178,7 @@ const HIDDEN_PREFIX: &str = ".";
 /// The maximum filesize we allow caching
 const MAX_FILESIZE: u64 = 1024_u64.pow(2) * 5;
 
-fn cache<P: AsRef<std::path::Path>>(path: P) -> bool {
+fn cache<P: AsRef<path::Path>>(path: P) -> bool {
     let path = path.as_ref();
     let Ok(file) = fs::File::open(path) else {
         return false;
@@ -198,12 +198,12 @@ fn cache<P: AsRef<std::path::Path>>(path: P) -> bool {
 
 #[derive(Debug, Clone)]
 struct CacheSettings<'a> {
-    path: Cow<'a, std::path::Path>,
+    path: Cow<'a, path::Path>,
     prefix: Option<Cow<'a, OsStr>>,
 }
 
 impl<'a> CacheSettings<'a> {
-    pub fn new<P: Into<Cow<'a, std::path::Path>>, F: Into<Cow<'a, OsStr>>>(
+    pub fn new<P: Into<Cow<'a, path::Path>>, F: Into<Cow<'a, OsStr>>>(
         path: P,
         prefix: Option<F>,
     ) -> Self {
@@ -219,7 +219,7 @@ impl<'a> CacheSettings<'a> {
     }
 }
 
-fn path_to_cachefile_noprefix<'a, P: AsRef<std::path::Path>>(
+fn path_to_cachefile_noprefix<'a, P: AsRef<path::Path>>(
     path: P,
     cache_settings: &'a CacheSettings,
 ) -> PathBuf {
@@ -233,7 +233,7 @@ fn path_to_cachefile_noprefix<'a, P: AsRef<std::path::Path>>(
     path_to_cachefile(path, &cache_settings)
 }
 
-fn path_to_cachefile<'a, P: AsRef<std::path::Path>>(
+fn path_to_cachefile<'a, P: AsRef<path::Path>>(
     path: P,
     cache_settings: &'a CacheSettings,
 ) -> PathBuf {
@@ -264,7 +264,7 @@ const TAIL_BYTE: u8 = b'\n';
 /// overwrite it, make sure to seek to the beginning!
 ///
 /// Some(Err()) and None values indicate that you should run clear_file_cache
-fn check_hash<'a, P: AsRef<std::path::Path> + Debug, P2: AsRef<std::path::Path> + Debug>(
+fn check_hash<'a, P: AsRef<path::Path> + Debug, P2: AsRef<std::path::Path> + Debug>(
     path: P,
     // The path of the file to compare the hash of
     check: P2,
@@ -305,7 +305,7 @@ fn check_hash<'a, P: AsRef<std::path::Path> + Debug, P2: AsRef<std::path::Path> 
     let _ = check_file.seek(io::SeekFrom::Start(0));
     Some(Err(check_file))
 }
-fn cache_file<'a, P: AsRef<std::path::Path>, T: AsRef<std::path::Path> + Debug>(
+fn cache_file<'a, P: AsRef<path::Path>, T: AsRef<std::path::Path> + Debug>(
     path: P,
     data: impl AsRef<[u8]>,
     source: T,
@@ -363,10 +363,7 @@ fn cache_file<'a, P: AsRef<std::path::Path>, T: AsRef<std::path::Path> + Debug>(
     }
 }
 #[instrument(level = "debug")]
-fn clear_file_cache<'a, P: AsRef<std::path::Path> + Debug>(
-    path: P,
-    cache_settings: &'a CacheSettings,
-) {
+fn clear_file_cache<'a, P: AsRef<path::Path> + Debug>(path: P, cache_settings: &'a CacheSettings) {
     let cache_file_path = path_to_cachefile(&path, cache_settings);
     let cache_file_path_noprefix = path_to_cachefile_noprefix(&path, cache_settings);
     let span = debug_span!(
@@ -506,13 +503,13 @@ fn handle_path<'a>(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The path to get the files we're going to host from
-    let cache_settings = CacheSettings::new(std::path::Path::new("cache"), Some(OsStr::new("c_")));
+    let cache_settings = CacheSettings::new(path::Path::new("cache"), Some(OsStr::new("c_")));
     assert!(
         cache_settings.ensure_path_exists(),
         "Failed to read/initialize cache path directory"
     );
     let path: &str = "public";
-    let path_os = std::path::Path::new(path).canonicalize().expect("Failed to open target path, are you sure you're in the right directory and the target is readable by the user?");
+    let path_os = path::Path::new(path).canonicalize().expect("Failed to open target path, are you sure you're in the right directory and the target is readable by the user?");
     let path_prefix_len = path_os.iter().count();
     // let config = Box::leak(Box::new(ArcSwap::from_pointee(Config {
     //     path,
@@ -642,7 +639,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // below will be monitored for changes.
         debouncer
             .watcher()
-            .watch(std::path::Path::new(path), notify::RecursiveMode::Recursive)?;
+            .watch(path::Path::new(path), notify::RecursiveMode::Recursive)?;
         info!("Registered filesystem watcher");
         let mut change_map = HashMap::new();
         for events in rx {
@@ -814,7 +811,7 @@ return ( StatusCode::NOT_FOUND,"Not Found.\n",).into_response()
 }
 
 #[instrument(level = "debug")]
-fn get_ext<P: AsRef<std::path::Path> + Debug>(path: P) -> &'static str {
+fn get_ext<P: AsRef<path::Path> + Debug>(path: P) -> &'static str {
     let path = path.as_ref();
     let ext = path.extension().map(|ext| ext.to_string_lossy());
     ext.map(|ext| MIME_TYPES.get(&ext))

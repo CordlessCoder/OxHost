@@ -208,7 +208,7 @@ nav {
     gap: 0.5em;
     width: 100%;
     justify-content: flex-start;
-    height: 60vh;
+    margin-bottom: 0.5em;
   }
   .menu-item-mobile {
     background-color: rgba(246, 246, 246, 0.2);

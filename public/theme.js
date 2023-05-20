@@ -5,7 +5,7 @@ themeButtons.forEach((btn) => {
   btn.addEventListener("click", (_) => {
     if (!enabledAnimation) {
       document.styleSheets[0].insertRule(
-        "* {  --color-transition: 250ms; transition: background-color var(--color-transition), color var(--color-transition);}"
+        "* {  --color-transition: 250ms; transition: background-color var(--color-transition) 100ms, color var(--color-transition);}"
       );
       enabledAnimation = true;
     }
