@@ -15,6 +15,7 @@ arc-swap = "1.6.0"
 axum = { version = "0.6.18", features = ["http2", "macros"] }
 bytesize = "1.2.0"
 dashmap = "5.4.0"
+md-5 = "0.10.5"
 minify-html = "0.11.1"
 minify-js = "0.5.6"
 notify = { version = "6.0.0", default-features = false, features = ["mio", "macos_kqueue"] }
@@ -22,7 +23,8 @@ notify-deb = {package = "notify-debouncer-full", version = "0.1", default-featur
 os_str_bytes = "6.5.0"
 path-clean = "1.0.1"
 phf = { version = "0.11.1", features = ["macros"] }
-tokio = { version = "1.28.1", features = ["rt", "rt-multi-thread", "macros", "sync", "mio", "net", "time", "fs", "full"] }
+sha2 = { version = "0.10.6", features = ["asm"] }
+tokio = { version = "1.28.1", features = ["rt", "rt-multi-thread", "macros", "sync", "mio", "net", "time", "fs"] }
 tokio-util = { version = "0.7.8", features = ["full"] }
 tracing = "0.1.37"
 tracing-appender = { version = "0.2.2", features = ["parking_lot"] }
