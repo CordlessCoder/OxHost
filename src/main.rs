@@ -23,7 +23,7 @@ use std::{
     collections::HashMap,
     ffi::{OsStr, OsString},
     fmt::Debug,
-    fs::create_dir_all,
+    fs::{self, create_dir_all},
     io::{self, stderr, Read, Seek, Stderr, Write},
     net::SocketAddr,
     ops::Deref,
@@ -97,20 +97,17 @@ impl StdoutWrapper {
 }
 
 impl Write for StdoutWrapper {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.out.write(buf)
     }
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         self.out.flush()
     }
-    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+    fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
         self.out.write_all(buf)
     }
-    fn write_fmt(&mut self, fmt: std::fmt::Arguments<'_>) -> std::io::Result<()> {
+    fn write_fmt(&mut self, fmt: std::fmt::Arguments<'_>) -> io::Result<()> {
         self.out.write_fmt(fmt)
-    }
-    fn write_vectored(&mut self, bufs: &[std::io::IoSlice<'_>]) -> std::io::Result<usize> {
-        self.out.write_vectored(bufs)
     }
 }
 
@@ -139,12 +136,12 @@ impl<'a, W> Write for LogWriter<'a, W>
 where
     W: Write,
 {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let bytes = self.file_writer.write(buf)?;
         self.output.write_all(&buf[..bytes])?;
         Ok(bytes)
     }
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         self.file_writer.flush()?;
         self.output.flush()
     }
@@ -179,11 +176,11 @@ enum FileState {
 const HIDDEN_PREFIX: &str = ".";
 
 /// The maximum filesize we allow caching
-const MAX_FILESIZE: u64 = 1024_u64.pow(2) * 50;
+const MAX_FILESIZE: u64 = 1024_u64.pow(2) * 5;
 
 fn cache<P: AsRef<std::path::Path>>(path: P) -> bool {
     let path = path.as_ref();
-    let Ok(file) = std::fs::File::open(path) else {
+    let Ok(file) = fs::File::open(path) else {
         return false;
     };
     let Ok(meta) = file.metadata() else {
@@ -272,10 +269,10 @@ fn check_hash<'a, P: AsRef<std::path::Path> + Debug, P2: AsRef<std::path::Path> 
     // The path of the file to compare the hash of
     check: P2,
     cache_settings: &'a CacheSettings,
-) -> Option<Result<std::fs::File, std::fs::File>> {
+) -> Option<Result<fs::File, fs::File>> {
     let cachepath = path_to_cachefile(path, cache_settings);
     let mut buf = [0; 16];
-    let Ok(mut cache_file) = std::fs::File::open(&cachepath) else {
+    let Ok(mut cache_file) = fs::File::open(&cachepath) else {
             debug!("Couild not find cache file at {cachepath:?}");
             return None
         };
@@ -289,7 +286,7 @@ fn check_hash<'a, P: AsRef<std::path::Path> + Debug, P2: AsRef<std::path::Path> 
         warn!("Tail byte didn't match in cache file at {cachepath:?}");
         return None;
     };
-    let Ok(mut check_file) = std::fs::File::open(&check) else {
+    let Ok(mut check_file) = fs::File::open(&check) else {
             info!("Failed to open file at {check:?}");
             return None
         };
@@ -323,7 +320,7 @@ fn cache_file<'a, P: AsRef<std::path::Path>, T: AsRef<std::path::Path> + Debug>(
     };
     let cache_file_path = path_to_cachefile(path, cache_settings);
     if let Some(folder) = cache_file_path.parent() {
-        if let Err(err) = std::fs::create_dir_all(folder) {
+        if let Err(err) = fs::create_dir_all(folder) {
             error!(
                 "Failed to create folder hieararchy {folder:?} for cache file {:?}: {err}",
                 cache_file_path.file_name().unwrap_or_default()
@@ -331,7 +328,7 @@ fn cache_file<'a, P: AsRef<std::path::Path>, T: AsRef<std::path::Path> + Debug>(
             return;
         }
     }
-    let Ok(mut cache_file) = std::fs::File::create(&cache_file_path) else {
+    let Ok(mut cache_file) = fs::File::create(&cache_file_path) else {
             error!("Failed to create cache file at {cache_file_path:?}");
             return
         };
@@ -339,7 +336,7 @@ fn cache_file<'a, P: AsRef<std::path::Path>, T: AsRef<std::path::Path> + Debug>(
         error!("Failed to truncate file at {cache_file:?}: {err}");
         return;
     };
-    let Ok(mut check_file) = std::fs::File::open(source) else {
+    let Ok(mut check_file) = fs::File::open(source) else {
             info!("Failed to open file at {source:?}");
             return
         };
@@ -349,19 +346,21 @@ fn cache_file<'a, P: AsRef<std::path::Path>, T: AsRef<std::path::Path> + Debug>(
         return;
     };
     let hash = hasher.finalize();
-    let Ok(()) = cache_file.write_all(&hash) else {
-            error!("Failed to write hash to cache file at {cache_file_path:?}");
-            return
-        };
-    let Ok(()) = cache_file.write_all(&[TAIL_BYTE]) else {
-            error!("Failed to write hash tail byte to cache file at {cache_file_path:?}");
-            return
-        };
-    let Ok(()) = cache_file.write_all(data) else {
-            error!("Failed to write hash tail byte to cache file at {cache_file_path:?}");
-            return
-        };
-    cache_file.sync_data().unwrap()
+    if let Err(err) = cache_file.write_all(&hash) {
+        error!("Failed to write hash to cache file at {cache_file_path:?}: {err}");
+        return;
+    };
+    if let Err(err) = cache_file.write_all(&[TAIL_BYTE]) {
+        error!("Failed to write hash tail byte to cache file at {cache_file_path:?}: {err}");
+        return;
+    };
+    if let Err(err) = cache_file.write_all(data) {
+        error!("Failed to write hash tail byte to cache file at {cache_file_path:?}: {err}");
+        return;
+    };
+    if let Err(err) = cache_file.sync_data() {
+        error!("Failed sync cache file at {cache_file_path:?} to disk: {err}");
+    }
 }
 #[instrument(level = "debug")]
 fn clear_file_cache<'a, P: AsRef<std::path::Path> + Debug>(
@@ -375,9 +374,9 @@ fn clear_file_cache<'a, P: AsRef<std::path::Path> + Debug>(
         path = format!("{cache_file_path:?}, {cache_file_path_noprefix:?}")
     )
     .entered();
-    let mut success = std::fs::remove_dir_all(&cache_file_path).is_ok();
-    success |= std::fs::remove_dir_all(&cache_file_path_noprefix).is_ok();
-    success |= std::fs::remove_file(&cache_file_path).is_ok();
+    let mut success = fs::remove_dir_all(&cache_file_path).is_ok();
+    success |= fs::remove_dir_all(&cache_file_path_noprefix).is_ok();
+    success |= fs::remove_file(&cache_file_path).is_ok();
     span.exit();
     if success {
         debug!("Removed cache file/dir at {cache_file_path:?}");
@@ -451,7 +450,7 @@ fn handle_path<'a>(
                 let mut file_data = match other {
                     Some(Err(source)) => source,
                     _ => {
-                        let Ok(file_data) = std::fs::File::open(&original_path) else {
+                        let Ok(file_data) = fs::File::open(&original_path) else {
             debug!("Failed to open file {original_path:?}. Likely caused by file deletion after modification on a debounce boundary");
             return;
                 };
@@ -578,7 +577,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let original_path = entry.path();
             if entry.metadata().is_ok_and(|meta| meta.is_dir()) {
                 // Attempt to clean up any empty cache dir left behind
-                let _ = std::fs::remove_dir(path);
+                let _ = fs::remove_dir(path);
                 continue;
             }
             let Ok(path)=original_path.strip_prefix(&cache_settings.path) else {
@@ -599,7 +598,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let Some(name) = s
                     .strip_prefix(prefix.to_str().unwrap()).map(|s|s.to_os_str()) else {
                 warn!("Could not remove cache prefix from {original_path:?}. Deleting it.");
-                if std::fs::remove_file(original_path).is_ok() {
+                if fs::remove_file(original_path).is_ok() {
                     info!("Deleted {original_path:?} successfully")
                 };
                 continue
@@ -611,7 +610,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let path = final_path;
             if !path.exists() {
                 info!("Found dead cache file {original_path:?}. Deleting it.");
-                if std::fs::remove_file(original_path).is_ok() {
+                if fs::remove_file(original_path).is_ok() {
                     info!("Deleted {original_path:?} successfully")
                 };
             }
@@ -724,7 +723,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             span.exit();
-            info!("After filesystem sync: {map:?}")
+            debug!("After filesystem sync: {map:?}")
         }
         Ok(())
     });
@@ -758,6 +757,8 @@ async fn get_file(State(state): State<AppState>, Path(path): Path<PathBuf>) -> i
                 let body = StreamBody::new(stream);
                 // "asd".into_response()
                 break Some(
+                    // SAFETY: Responses built from a byte-only body and with a CONTENT_TYPE
+                    // provided by axum cannot fail to parse
                     Response::builder()
                         .header(header::CONTENT_TYPE, get_ext(path))
                         .body(body)
@@ -826,14 +827,3 @@ fn get_ext<P: AsRef<std::path::Path> + Debug>(path: P) -> &'static str {
 async fn root(state: State<AppState>) -> impl IntoResponse {
     get_file(state, Path(PathBuf::new())).await
 }
-
-// async fn flatten<T, E>(handle: JoinHandle<Result<T, E>>) -> Result<T, E> {
-//     match handle.await {
-//         Ok(Ok(result)) => Ok(result),
-//         Ok(Err(err)) => Err(err),
-//         Err(err) => {
-//             error!("Failed to spawn a task in a flatten call: {err:?}");
-//             panic!("Failed to spawn")
-//         }
-//     }
-// }

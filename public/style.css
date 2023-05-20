@@ -46,7 +46,6 @@ h3 {
   justify-content: center;
   align-items: center;
   gap: 5em;
-  transition: transform 1s ease;
 }
 
 body {
@@ -209,7 +208,7 @@ nav {
     gap: 0.5em;
     width: 100%;
     justify-content: flex-start;
-    height: 100vh;
+    height: 60vh;
   }
   .menu-item-mobile {
     background-color: rgba(246, 246, 246, 0.2);
