@@ -10,6 +10,7 @@ use axum::{
 };
 use bytesize::ByteSize;
 use dashmap::DashMap;
+use md5::{Digest, Md5};
 use mime_types::MIME_TYPES;
 use minify_html::Cfg;
 use minify_js::Session;
@@ -17,7 +18,6 @@ use notify::{Event, Watcher};
 use notify_deb::{new_debouncer, DebounceEventResult};
 use os_str_bytes::RawOsStr;
 use path_clean::PathClean;
-use sha2::{Digest, Sha256};
 use std::{
     borrow::Cow,
     collections::HashMap,
@@ -179,7 +179,7 @@ enum FileState {
 const HIDDEN_PREFIX: &str = ".";
 
 /// The maximum filesize we allow caching
-const MAX_FILESIZE: u64 = 1024_u64.pow(2) * 20;
+const MAX_FILESIZE: u64 = 1024_u64.pow(2) * 50;
 
 fn cache<P: AsRef<std::path::Path>>(path: P) -> bool {
     let path = path.as_ref();
@@ -274,7 +274,7 @@ fn check_hash<'a, P: AsRef<std::path::Path> + Debug, P2: AsRef<std::path::Path> 
     cache_settings: &'a CacheSettings,
 ) -> Option<Result<std::fs::File, std::fs::File>> {
     let cachepath = path_to_cachefile(path, cache_settings);
-    let mut buf = [0; 32];
+    let mut buf = [0; 16];
     let Ok(mut cache_file) = std::fs::File::open(&cachepath) else {
             debug!("Couild not find cache file at {cachepath:?}");
             return None
@@ -293,7 +293,7 @@ fn check_hash<'a, P: AsRef<std::path::Path> + Debug, P2: AsRef<std::path::Path> 
             info!("Failed to open file at {check:?}");
             return None
         };
-    let mut hasher = Sha256::new();
+    let mut hasher = Md5::new();
     if let Err(err) = io::copy(&mut check_file, &mut hasher) {
         info!("Failed to hash file at {check_file:?}: {err}");
         let _ = check_file.seek(io::SeekFrom::Start(0));
@@ -343,7 +343,7 @@ fn cache_file<'a, P: AsRef<std::path::Path>, T: AsRef<std::path::Path> + Debug>(
             info!("Failed to open file at {source:?}");
             return
         };
-    let mut hasher = Sha256::new();
+    let mut hasher = Md5::new();
     if let Err(err) = io::copy(&mut check_file, &mut hasher) {
         info!("Failed to hash file at {check_file:?}: {err}");
         return;
