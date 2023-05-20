@@ -3,13 +3,14 @@
 use axum::{
     body::{Bytes, StreamBody},
     extract::{Path, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Router,
 };
 use bytesize::ByteSize;
 use dashmap::DashMap;
+use flate2::Compression;
 use md5::{Digest, Md5};
 use mime_types::MIME_TYPES;
 use minify_html::Cfg;
@@ -45,17 +46,49 @@ const SOCKETADDR: ([u8; 4], u16) = ([127, 0, 0, 1], 3000);
 #[derive(Clone)]
 enum FileData {
     /// The bytes of the cached file + the mime-type string
-    Cached(Bytes),
+    Cached {
+        raw: Bytes,
+        gzip: Bytes,
+        deflate: Bytes,
+    },
     References(Arc<PathBuf>),
     Processing(Instant),
     Uncached(Arc<PathBuf>),
+}
+
+impl FileData {
+    pub fn new_cached(raw: Bytes) -> Self {
+        let mut gzip =
+            flate2::GzBuilder::new().write(Vec::with_capacity(raw.len()), Compression::new(9));
+        let _ = gzip.write_all(&raw);
+        let mut gzip = gzip.finish().unwrap();
+        gzip.shrink_to_fit();
+        let mut deflate =
+            flate2::write::DeflateEncoder::new(Vec::with_capacity(raw.len()), Compression::new(9));
+        let _ = deflate.write_all(&raw);
+        let mut deflate = deflate.finish().unwrap();
+        deflate.shrink_to_fit();
+        Self::Cached {
+            raw,
+            gzip: Bytes::from(gzip),
+            deflate: Bytes::from(deflate),
+        }
+    }
 }
 
 impl Debug for FileData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         use FileData::*;
         match self {
-            Cached(cache) => write!(f, "Cached({})", ByteSize::b(cache.len() as u64)),
+            Cached { raw, gzip, deflate } => {
+                write!(
+                    f,
+                    "Cached(raw: {}, gzip: {}, deflate: {})",
+                    ByteSize::b(raw.len() as u64),
+                    ByteSize::b(gzip.len() as u64),
+                    ByteSize::b(deflate.len() as u64),
+                )
+            }
             References(target) => write!(f, "Links to {target:?}"),
             Processing(start) => write!(f, "Processing({:?})", start.elapsed()),
             Uncached(target) => write!(f, "Disk({target:?})"),
@@ -394,9 +427,7 @@ fn handle_path_deletion<'a>(
     map.retain(|k, _| !k.starts_with(&path));
     // map.iter().map(|r| r.pair()).filter(|(&p, _)| p.starts_with(base));
     // Remove prefix from path
-    if let Some((_, removed)) = map.remove(&path) {
-        if matches!(removed, FileData::Cached(_)) {}
-    };
+    let _ = map.remove(&path);
     if path.file_name() == Some(index_filename) {
         // Index file case
         // Remove index name from path
@@ -437,7 +468,8 @@ fn handle_path<'a>(
                 warn!("Encountered error while reading cache file: {err}");
                 return;
             };
-            FileData::Cached(Bytes::from(buf))
+            buf.shrink_to_fit();
+            FileData::new_cached(Bytes::from(buf))
         }
         // Cache file doesn't match
         other => {
@@ -482,7 +514,7 @@ fn handle_path<'a>(
                 if cache {
                     cache_file(&*path, &buf, original_path, cache_settings);
                 }
-                FileData::Cached(Bytes::from(buf))
+                FileData::new_cached(Bytes::from(buf))
             }
         }
     };
@@ -503,7 +535,7 @@ fn handle_path<'a>(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The path to get the files we're going to host from
-    let cache_settings = CacheSettings::new(path::Path::new("cache"), Some(OsStr::new("c_")));
+    let cache_settings = CacheSettings::new(path::Path::new("cache"), Some(OsStr::new("")));
     assert!(
         cache_settings.ensure_path_exists(),
         "Failed to read/initialize cache path directory"
@@ -544,7 +576,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let span = debug_span!("Creating debouncer and fs notifier").entered();
         let (tx, rx) = sync_channel(8);
         let mut debouncer = new_debouncer(
-            Duration::from_millis(1000 / 2),
+            Duration::from_millis(1000 / 5),
             None,
             move |res: DebounceEventResult| {
                 if let Ok(events) = res {
@@ -729,11 +761,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn is_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+fn get_preferred_encoding(
+    raw: Bytes,
+    gzip: Bytes,
+    deflate: Bytes,
+    headers: &HeaderMap,
+) -> (Bytes, Option<&'static str>) {
+    let Some(enc) = headers.get("Accept-Encoding") else {
+        return (raw, None)
+    };
+    let header = enc.as_bytes();
+    if is_subslice(header, b"deflate") {
+        return (deflate, Some("deflate"));
+    }
+    if is_subslice(header, b"gzip") {
+        return (gzip, Some("gzip"));
+    }
+    (raw, None)
+}
+
 // basic handler that responds with a static string
 // #[instrument(skip(state))]
 #[instrument(level = "debug")]
 #[axum::debug_handler]
-async fn get_file(State(state): State<AppState>, Path(path): Path<PathBuf>) -> impl IntoResponse {
+async fn get_file(
+    State(state): State<AppState>,
+    Path(path): Path<PathBuf>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let mut start = None;
     let res = 'main: loop {
         use FileData::*;
@@ -762,14 +823,17 @@ async fn get_file(State(state): State<AppState>, Path(path): Path<PathBuf>) -> i
                         .into_response(),
                 );
             }
-            Cached(bytes) => {
-                break Some(
-                    Response::builder()
-                        .header(header::CONTENT_TYPE, get_ext(&path))
-                        .body(bytes.clone().into_response())
-                        .unwrap()
-                        .into_response(),
-                )
+            Cached { raw, gzip, deflate } => {
+                let (bytes, compression) = get_preferred_encoding(raw, gzip, deflate, &headers);
+                break Some({
+                    let mut builder =
+                        Response::builder().header(header::CONTENT_TYPE, get_ext(&path));
+                    // Add compression flag
+                    if let Some(comp) = compression {
+                        builder = builder.header(header::CONTENT_ENCODING, comp)
+                    };
+                    builder.body(bytes.into_response()).unwrap().into_response()
+                });
             }
             References(newpath) => {
                 let path = newpath;
@@ -806,14 +870,18 @@ async fn get_file(State(state): State<AppState>, Path(path): Path<PathBuf>) -> i
                                 .into_response(),
                         );
                     }
-                    Cached(bytes) => {
-                        break Some(
-                            Response::builder()
-                                .header(header::CONTENT_TYPE, get_ext(path.as_ref()))
-                                .body(bytes.into_response())
-                                .unwrap()
-                                .into_response(),
-                        )
+                    Cached { raw, gzip, deflate } => {
+                        let (bytes, compression) =
+                            get_preferred_encoding(raw, gzip, deflate, &headers);
+                        break Some({
+                            let mut builder = Response::builder()
+                                .header(header::CONTENT_TYPE, get_ext(path.as_ref()));
+                            // Add compression flag
+                            if let Some(comp) = compression {
+                                builder = builder.header(header::CONTENT_ENCODING, comp)
+                            };
+                            builder.body(bytes.into_response()).unwrap().into_response()
+                        });
                     }
                     Processing(_) => {
                         start = Some(Instant::now());
@@ -860,6 +928,6 @@ fn get_ext<P: AsRef<path::Path> + Debug>(path: P) -> &'static str {
 }
 
 // basic handler that responds with a static string
-async fn root(state: State<AppState>) -> impl IntoResponse {
-    get_file(state, Path(PathBuf::new())).await
+async fn root(state: State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    get_file(state, Path(PathBuf::new()), headers).await
 }
