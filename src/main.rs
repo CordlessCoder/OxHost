@@ -48,7 +48,7 @@ enum FileData {
     Cached(Bytes),
     References(Arc<PathBuf>),
     Processing(Instant),
-    Uncached(PathBuf),
+    Uncached(Arc<PathBuf>),
 }
 
 impl Debug for FileData {
@@ -442,7 +442,7 @@ fn handle_path<'a>(
         // Cache file doesn't match
         other => {
             if !cache(&original_path) {
-                FileData::Uncached(original_path)
+                FileData::Uncached(Arc::new(original_path))
             } else {
                 let mut file_data = match other {
                     Some(Err(source)) => source,
@@ -734,18 +734,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[instrument(level = "debug")]
 #[axum::debug_handler]
 async fn get_file(State(state): State<AppState>, Path(path): Path<PathBuf>) -> impl IntoResponse {
-    let mut path = Arc::new(path);
+    let mut start = None;
     let res = 'main: loop {
         use FileData::*;
-        let Some(file) = state.map.get(&path) else {
+        let Some(file) = state.map.view(&path, |_, v| v.clone()) else {
             return ( StatusCode::NOT_FOUND,"Not Found.\n",).into_response()
         };
-        let file: &FileData = file.deref();
         // Loop in case we need to traverse references
         match file {
             Uncached(path) => {
                 // Get file from filesystem
-                let Ok(file) = File::open(path).await else {
+                let Ok(file) = File::open(path.as_ref()).await else {
                 break None
             };
                 // convert the `AsyncRead` into a `Stream`
@@ -757,7 +756,7 @@ async fn get_file(State(state): State<AppState>, Path(path): Path<PathBuf>) -> i
                     // SAFETY: Responses built from a byte-only body and with a CONTENT_TYPE
                     // provided by axum cannot fail to parse
                     Response::builder()
-                        .header(header::CONTENT_TYPE, get_ext(path))
+                        .header(header::CONTENT_TYPE, get_ext(path.as_ref()))
                         .body(body)
                         .unwrap()
                         .into_response(),
@@ -766,14 +765,61 @@ async fn get_file(State(state): State<AppState>, Path(path): Path<PathBuf>) -> i
             Cached(bytes) => {
                 break Some(
                     Response::builder()
-                        .header(header::CONTENT_TYPE, get_ext(path.as_ref()))
+                        .header(header::CONTENT_TYPE, get_ext(&path))
                         .body(bytes.clone().into_response())
                         .unwrap()
                         .into_response(),
                 )
             }
             References(newpath) => {
-                path = newpath.clone();
+                let path = newpath;
+                let Some(mut data) = state.map.view(&path, |_, v| v.clone()) else {
+                        info!("The FileData of {path:?} disappeared resolving reference chain");
+                        break 'main None
+                    };
+                while matches!(data, References(_)) {
+                    let Some(newdata) = state.map.view(&path, |_, v| v.clone()) else {
+                        info!("The FileData of {path:?} disappeared resolving reference chain");
+                        break 'main None
+                    };
+                    data = newdata;
+                }
+                match data {
+                    Uncached(path) => {
+                        // Get file from filesystem
+                        let Ok(file) = File::open(path.as_ref()).await else {
+                            warn!("Failed to open {path:?}. Likely the deletion notification didn't come through yet");
+                break None
+            };
+                        // convert the `AsyncRead` into a `Stream`
+                        let stream = ReaderStream::new(file);
+                        // convert the `Stream` into an `axum::body::HttpBody`
+                        let body = StreamBody::new(stream);
+                        // "asd".into_response()
+                        break Some(
+                            // SAFETY: Responses built from a byte-only body and with a CONTENT_TYPE
+                            // provided by axum cannot fail to parse
+                            Response::builder()
+                                .header(header::CONTENT_TYPE, get_ext(path.as_ref()))
+                                .body(body)
+                                .unwrap()
+                                .into_response(),
+                        );
+                    }
+                    Cached(bytes) => {
+                        break Some(
+                            Response::builder()
+                                .header(header::CONTENT_TYPE, get_ext(path.as_ref()))
+                                .body(bytes.into_response())
+                                .unwrap()
+                                .into_response(),
+                        )
+                    }
+                    Processing(_) => {
+                        start = Some(Instant::now());
+                    }
+                    References(..) => unreachable!(),
+                }
             }
             Processing(proc_start) => {
                 // Wait for processing to complete
@@ -781,26 +827,19 @@ async fn get_file(State(state): State<AppState>, Path(path): Path<PathBuf>) -> i
                     "Waiting for processing of {path:?}({:?}) to finish.",
                     proc_start.elapsed()
                 );
-                const TIMEOUT: Duration = Duration::from_secs(1);
-                let start = Instant::now();
-                let mut interval = tokio::time::interval(Duration::from_millis(50));
-                // interval.tick().await
-                while start.elapsed() < TIMEOUT {
-                    interval.tick().await;
-                    let Some(data) = state.map.get(&path) else {
-                        info!("The FileData of {path:?}({:?}) disappeared while waiting for its processing to finish", proc_start.elapsed());
-                        break 'main None
-                    };
-                    let data = data.deref();
-                    if !matches!(data, Processing(_)) {
-                        continue 'main;
-                    }
+                start = Some(start.unwrap_or_else(|| Instant::now()));
+                const TIMEOUT: Duration = Duration::from_millis(100);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                // SAFETY: We set start to Some 2 lines above
+                if start.unwrap().elapsed() > TIMEOUT {
+                    warn!(
+                        "Waiting for the FileData of {path:?}({:?}) to finish processing timed out",
+                        proc_start.elapsed()
+                    );
+                    break 'main None;
                 }
-                error!(
-                    "Waiting for the FileData of {path:?}({:?}) to finish processing timed out",
-                    proc_start.elapsed()
-                );
-                break 'main None;
+                // Keep waiting for data to finish processing
+                continue 'main;
             }
         }
     };

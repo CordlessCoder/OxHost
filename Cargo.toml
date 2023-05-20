@@ -15,6 +15,7 @@ arc-swap = "1.6.0"
 axum = { version = "0.6.18", features = ["http2", "macros"] }
 bytesize = "1.2.0"
 dashmap = "5.4.0"
+# dashmap = "5.4.0"
 md-5 = "0.10.5"
 minify-html = "0.11.1"
 minify-js = "0.5.6"
