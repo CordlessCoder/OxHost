@@ -276,17 +276,17 @@ fn check_hash<'a, P: AsRef<std::path::Path> + Debug, P2: AsRef<std::path::Path> 
     let cachepath = path_to_cachefile(path, cache_settings);
     let mut buf = [0; 32];
     let Ok(mut cache_file) = std::fs::File::open(&cachepath) else {
-            info!("Failed to open cache file at {cachepath:?}");
+            debug!("Couild not find cache file at {cachepath:?}");
             return None
         };
     if let Err(err) = cache_file.read_exact(&mut buf) {
-        error!("Failed to read hash from cache file at {cachepath:?}: {err}");
+        info!("Failed to read hash from cache file at {cachepath:?}: {err}");
         return None;
     };
     let mut tail_check = [0];
     let _ = cache_file.read_exact(&mut tail_check);
     if tail_check != [TAIL_BYTE] {
-        error!("Tail byte didn't match in cache file at {cachepath:?}");
+        warn!("Tail byte didn't match in cache file at {cachepath:?}");
         return None;
     };
     let Ok(mut check_file) = std::fs::File::open(&check) else {
@@ -567,7 +567,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         span.exit();
 
         let index_filename: &OsStr = OsStr::new("index.html");
-        let span = info_span!("Checking for dead cachefiles").entered();
+        let span = info_span!("Checking for dead files in cache").entered();
         for entry in WalkDir::new(&cache_settings.path)
             .follow_links(false)
             .max_open(10)
