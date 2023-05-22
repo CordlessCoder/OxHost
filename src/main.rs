@@ -41,7 +41,7 @@ use walkdir::WalkDir;
 
 mod mime_types;
 
-const SOCKETADDR: ([u8; 4], u16) = ([127, 0, 0, 1], 3000);
+const SOCKETADDR: ([u8; 4], u16) = ([0, 0, 0, 0], 80);
 
 #[derive(Clone)]
 enum FileData {
@@ -240,7 +240,7 @@ impl<'a> CacheSettings<'a> {
         path: P,
         prefix: Option<F>,
     ) -> Self {
-        let path = path.into().into();
+        let path = path.into();
         let prefix = prefix.map(|i| i.into());
         CacheSettings { path, prefix }
     }
@@ -252,9 +252,9 @@ impl<'a> CacheSettings<'a> {
     }
 }
 
-fn path_to_cachefile_noprefix<'a, P: AsRef<path::Path>>(
+fn path_to_cachefile_noprefix<P: AsRef<path::Path>>(
     path: P,
-    cache_settings: &'a CacheSettings,
+    cache_settings: &CacheSettings,
 ) -> PathBuf {
     let cache_settings = {
         let CacheSettings { path, .. } = cache_settings;
@@ -266,10 +266,7 @@ fn path_to_cachefile_noprefix<'a, P: AsRef<path::Path>>(
     path_to_cachefile(path, &cache_settings)
 }
 
-fn path_to_cachefile<'a, P: AsRef<path::Path>>(
-    path: P,
-    cache_settings: &'a CacheSettings,
-) -> PathBuf {
+fn path_to_cachefile<P: AsRef<path::Path>>(path: P, cache_settings: &CacheSettings) -> PathBuf {
     let path = path.as_ref();
     let mut cache_file_path = cache_settings.path.to_path_buf();
     cache_file_path.push(path);
@@ -297,11 +294,11 @@ const TAIL_BYTE: u8 = b'\n';
 /// overwrite it, make sure to seek to the beginning!
 ///
 /// Some(Err()) and None values indicate that you should run clear_file_cache
-fn check_hash<'a, P: AsRef<path::Path> + Debug, P2: AsRef<std::path::Path> + Debug>(
+fn check_hash<P: AsRef<path::Path> + Debug, P2: AsRef<std::path::Path> + Debug>(
     path: P,
     // The path of the file to compare the hash of
     check: P2,
-    cache_settings: &'a CacheSettings,
+    cache_settings: &CacheSettings,
 ) -> Option<Result<fs::File, fs::File>> {
     let cachepath = path_to_cachefile(path, cache_settings);
     let mut buf = [0; 16];
@@ -338,15 +335,15 @@ fn check_hash<'a, P: AsRef<path::Path> + Debug, P2: AsRef<std::path::Path> + Deb
     let _ = check_file.seek(io::SeekFrom::Start(0));
     Some(Err(check_file))
 }
-fn cache_file<'a, P: AsRef<path::Path>, T: AsRef<std::path::Path> + Debug>(
+fn cache_file<P: AsRef<path::Path>, T: AsRef<std::path::Path> + Debug>(
     path: P,
     data: impl AsRef<[u8]>,
     source: T,
-    cache_settings: &'a CacheSettings,
+    cache_settings: &CacheSettings,
 ) {
     let path = path.as_ref();
     let source = source.as_ref();
-    const MIN_CACHE_BYTES: usize = 0;
+    const MIN_CACHE_BYTES: usize = 256;
     let data = data.as_ref();
     if data.len() < MIN_CACHE_BYTES {
         return;
@@ -422,7 +419,7 @@ fn handle_path_deletion<'a>(
     map: FileMap,
 ) {
     let path = path.clean();
-    let mut path: PathBuf = path.into_iter().skip(path_prefix_len).collect();
+    let mut path: PathBuf = path.iter().skip(path_prefix_len).collect();
     clear_file_cache(&path, cache_settings);
     map.retain(|k, _| !k.starts_with(&path));
     // map.iter().map(|r| r.pair()).filter(|(&p, _)| p.starts_with(base));
@@ -448,7 +445,7 @@ fn handle_path<'a>(
     // Ignore hidden files
     if path
         .file_name()
-        .map(|name| RawOsStr::new(name))
+        .map(RawOsStr::new)
         .is_some_and(|name| name.starts_with(HIDDEN_PREFIX))
     {
         return;
@@ -623,7 +620,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // let path = path_os.join(.unwrap_or(OsStr::new(".")));
             let name = path.file_name().unwrap().to_os_string();
             if let Some(prefix) = &cache_settings.prefix {
-                let s = RawOsStr::new(&name).to_owned();
+                let s = RawOsStr::new(&name).into_owned();
                 let Some(name) = s
                     .strip_prefix(prefix.to_str().unwrap()).map(|s|s.to_os_str()) else {
                 warn!("Could not remove cache prefix from {original_path:?}. Deleting it.");
@@ -662,7 +659,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             };
             let path = entry.into_path();
-            handle_path(path, path_prefix_len, index_filename, &cache_settings, map)
+            let span = debug_span!("Registering {path}").entered();
+            handle_path(path, path_prefix_len, index_filename, &cache_settings, map);
+            span.exit();
         }
         span.exit();
         info!("Registered files: {map:?}");
@@ -791,6 +790,7 @@ fn get_preferred_encoding(
 
 // basic handler that responds with a static string
 // #[instrument(skip(state))]
+#[allow(clippy::let_with_type_underscore)]
 #[instrument(level = "debug")]
 #[axum::debug_handler]
 async fn get_file(
@@ -898,7 +898,7 @@ async fn get_file(
                     "Waiting for processing of {path:?}({:?}) to finish.",
                     proc_start.elapsed()
                 );
-                start = Some(start.unwrap_or_else(|| Instant::now()));
+                start = Some(start.unwrap_or_else(Instant::now));
                 const TIMEOUT: Duration = Duration::from_millis(100);
                 tokio::time::sleep(Duration::from_millis(10)).await;
                 // SAFETY: We set start to Some 2 lines above
@@ -924,9 +924,8 @@ return ( StatusCode::NOT_FOUND,"Not Found.\n",).into_response()
 fn get_ext<P: AsRef<path::Path> + Debug>(path: P) -> &'static str {
     let path = path.as_ref();
     let ext = path.extension().map(|ext| ext.to_string_lossy());
-    ext.map(|ext| MIME_TYPES.get(&ext))
-        .flatten()
-        .map(|&ext| ext)
+    ext.and_then(|ext| MIME_TYPES.get(&ext))
+        .copied()
         .unwrap_or("text/plain")
 }
 
